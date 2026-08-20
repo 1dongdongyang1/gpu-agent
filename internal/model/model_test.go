@@ -111,3 +111,29 @@ func TestObservationValidateEnforcesTypedDataAndError(t *testing.T) {
 		t.Fatalf("valid failed observation rejected: %v", err)
 	}
 }
+
+func TestGPUStatusRejectsMetricsForUnavailableGPU(t *testing.T) {
+	status := GPUStatus{GPUID: "GPU-0", Availability: GPUUnavailable, MemoryTotalMB: 24576}
+	if err := status.Validate(); err == nil {
+		t.Fatal("unavailable GPU with live metrics was accepted")
+	}
+	status.MemoryTotalMB = 0
+	if err := status.Validate(); err != nil {
+		t.Fatalf("valid unavailable GPU rejected: %v", err)
+	}
+}
+
+func TestDriverStatusEnforcesLoadedState(t *testing.T) {
+	for _, status := range []DriverStatusData{
+		{Loaded: false, Version: "550.54.15"},
+		{Loaded: false, NVMLAvailable: true},
+		{Loaded: true},
+	} {
+		if err := status.Validate(); err == nil {
+			t.Fatalf("invalid driver status accepted: %+v", status)
+		}
+	}
+	if err := (DriverStatusData{Loaded: true, Version: "550.54.15", NVMLAvailable: true}).Validate(); err != nil {
+		t.Fatalf("valid driver status rejected: %v", err)
+	}
+}

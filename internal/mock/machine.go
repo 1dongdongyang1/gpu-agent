@@ -3,11 +3,13 @@ package mock
 import (
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/1dongdongyang1/gpu-agent/internal/model"
 )
 
 type GPU struct {
+	Availability  model.GPUAvailability
 	ID            string
 	MemoryTotalMB int64
 	MemoryUsedMB  int64
@@ -24,9 +26,12 @@ type Process struct {
 
 // MachineState is the single source of truth read by every mock diagnostic tool.
 type MachineState struct {
-	TargetID  string
-	GPUs      map[string]GPU
-	Processes []Process
+	TargetID   string
+	GPUs       map[string]GPU
+	Processes  []Process
+	Driver     model.DriverStatusData
+	XIDEvents  []model.XIDEvent
+	KernelLogs []model.KernelLogEntry
 }
 
 func (m MachineState) Validate() error {
@@ -41,15 +46,13 @@ func (m MachineState) Validate() error {
 		if id == "" || gpu.ID == "" || id != gpu.ID {
 			return fmt.Errorf("GPU map key %q does not match GPU ID %q", id, gpu.ID)
 		}
-		if gpu.MemoryTotalMB <= 0 {
-			return fmt.Errorf("GPU %s total memory must be positive", id)
+		status := model.GPUStatus{Availability: gpu.Availability, GPUID: gpu.ID, MemoryTotalMB: gpu.MemoryTotalMB, MemoryUsedMB: gpu.MemoryUsedMB, Utilization: gpu.Utilization, TemperatureC: gpu.TemperatureC}
+		if err := status.Validate(); err != nil {
+			return fmt.Errorf("GPU %s: %w", id, err)
 		}
-		if gpu.MemoryUsedMB < 0 || gpu.MemoryUsedMB > gpu.MemoryTotalMB {
-			return fmt.Errorf("GPU %s used memory is outside [0,total]", id)
-		}
-		if gpu.Utilization < 0 || gpu.Utilization > 100 {
-			return fmt.Errorf("GPU %s utilization is outside [0,100]", id)
-		}
+	}
+	if err := m.Driver.Validate(); err != nil {
+		return err
 	}
 	seenPIDs := make(map[int]struct{}, len(m.Processes))
 	for _, process := range m.Processes {
@@ -73,7 +76,49 @@ func (m MachineState) Validate() error {
 			return fmt.Errorf("process memory on %s exceeds GPU used memory", gpuID)
 		}
 	}
+	seenEvents := make(map[string]struct{}, len(m.XIDEvents))
+	for _, event := range m.XIDEvents {
+		if err := event.Validate(); err != nil {
+			return err
+		}
+		if _, ok := m.GPUs[event.GPUID]; !ok {
+			return fmt.Errorf("Xid event %s references unknown GPU %s", event.ID, event.GPUID)
+		}
+		if _, exists := seenEvents[event.ID]; exists {
+			return fmt.Errorf("duplicate Xid event ID %s", event.ID)
+		}
+		seenEvents[event.ID] = struct{}{}
+	}
+	seenLogs := make(map[string]struct{}, len(m.KernelLogs))
+	for _, entry := range m.KernelLogs {
+		if err := entry.Validate(); err != nil {
+			return err
+		}
+		if _, ok := m.GPUs[entry.GPUID]; !ok {
+			return fmt.Errorf("kernel log %s references unknown GPU %s", entry.ID, entry.GPUID)
+		}
+		if _, exists := seenLogs[entry.ID]; exists {
+			return fmt.Errorf("duplicate kernel log ID %s", entry.ID)
+		}
+		seenLogs[entry.ID] = struct{}{}
+		if entry.RelatedXIDCode != nil && !m.hasRelatedXID(entry) {
+			return fmt.Errorf("kernel log %s has no matching Xid event", entry.ID)
+		}
+	}
 	return nil
+}
+
+func (m MachineState) hasRelatedXID(entry model.KernelLogEntry) bool {
+	for _, event := range m.XIDEvents {
+		delta := entry.OccurredAt.Sub(event.OccurredAt)
+		if delta < 0 {
+			delta = -delta
+		}
+		if event.GPUID == entry.GPUID && event.Code == *entry.RelatedXIDCode && delta <= 5*time.Minute {
+			return true
+		}
+	}
+	return false
 }
 
 func (m MachineState) QueryGPUStatus(targetID string) ([]model.GPUStatus, error) {
@@ -89,6 +134,7 @@ func (m MachineState) QueryGPUStatus(targetID string) ([]model.GPUStatus, error)
 	for _, id := range ids {
 		gpu := m.GPUs[id]
 		result = append(result, model.GPUStatus{
+			Availability:  gpu.Availability,
 			GPUID:         gpu.ID,
 			MemoryTotalMB: gpu.MemoryTotalMB,
 			MemoryUsedMB:  gpu.MemoryUsedMB,
@@ -106,6 +152,9 @@ func (m MachineState) QueryGPUProcesses(targetID, gpuID string) ([]model.GPUProc
 	if _, exists := m.GPUs[gpuID]; !exists {
 		return nil, fmt.Errorf("GPU %s is not registered", gpuID)
 	}
+	if m.GPUs[gpuID].Availability != model.GPUOnline {
+		return nil, fmt.Errorf("GPU %s is unavailable", gpuID)
+	}
 	result := make([]model.GPUProcess, 0)
 	for _, process := range m.Processes {
 		if process.GPUID == gpuID {
@@ -118,5 +167,62 @@ func (m MachineState) QueryGPUProcesses(targetID, gpuID string) ([]model.GPUProc
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].PID < result[j].PID })
+	return result, nil
+}
+
+func (m MachineState) QueryDriverStatus(targetID string) (model.DriverStatusData, error) {
+	if targetID != m.TargetID {
+		return model.DriverStatusData{}, fmt.Errorf("target %s is not this machine", targetID)
+	}
+	return m.Driver, nil
+}
+
+func (m MachineState) QueryXIDEvents(targetID, gpuID string, since time.Time, limit int) ([]model.XIDEvent, error) {
+	if targetID != m.TargetID {
+		return nil, fmt.Errorf("target %s is not this machine", targetID)
+	}
+	if _, exists := m.GPUs[gpuID]; !exists {
+		return nil, fmt.Errorf("GPU %s is not registered", gpuID)
+	}
+	result := make([]model.XIDEvent, 0)
+	for _, event := range m.XIDEvents {
+		if event.GPUID == gpuID && !event.OccurredAt.Before(since) {
+			result = append(result, event)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].OccurredAt.Equal(result[j].OccurredAt) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].OccurredAt.After(result[j].OccurredAt)
+	})
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func (m MachineState) QueryRecentKernelLogs(targetID, gpuID string, since time.Time, limit int) ([]model.KernelLogEntry, error) {
+	if targetID != m.TargetID {
+		return nil, fmt.Errorf("target %s is not this machine", targetID)
+	}
+	if _, exists := m.GPUs[gpuID]; !exists {
+		return nil, fmt.Errorf("GPU %s is not registered", gpuID)
+	}
+	result := make([]model.KernelLogEntry, 0)
+	for _, entry := range m.KernelLogs {
+		if entry.GPUID == gpuID && !entry.OccurredAt.Before(since) {
+			result = append(result, entry)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].OccurredAt.Equal(result[j].OccurredAt) {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].OccurredAt.After(result[j].OccurredAt)
+	})
+	if len(result) > limit {
+		result = result[:limit]
+	}
 	return result, nil
 }

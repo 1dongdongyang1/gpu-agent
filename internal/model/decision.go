@@ -9,8 +9,11 @@ const (
 )
 
 type ToolArguments struct {
-	QueryGPUStatus    *QueryGPUStatusArgs
-	QueryGPUProcesses *QueryGPUProcessesArgs
+	QueryGPUStatus        *QueryGPUStatusArgs
+	QueryGPUProcesses     *QueryGPUProcessesArgs
+	QueryDriverStatus     *QueryDriverStatusArgs
+	QueryXIDEvents        *QueryXIDEventsArgs
+	QueryRecentKernelLogs *QueryRecentKernelLogsArgs
 }
 
 func (a ToolArguments) count() int {
@@ -21,6 +24,15 @@ func (a ToolArguments) count() int {
 	if a.QueryGPUProcesses != nil {
 		count++
 	}
+	if a.QueryDriverStatus != nil {
+		count++
+	}
+	if a.QueryXIDEvents != nil {
+		count++
+	}
+	if a.QueryRecentKernelLogs != nil {
+		count++
+	}
 	return count
 }
 
@@ -28,6 +40,20 @@ type QueryGPUStatusArgs struct{}
 
 type QueryGPUProcessesArgs struct {
 	GPUID string
+}
+
+type QueryDriverStatusArgs struct{}
+
+type QueryXIDEventsArgs struct {
+	GPUID        string
+	SinceMinutes int
+	Limit        int
+}
+
+type QueryRecentKernelLogsArgs struct {
+	GPUID        string
+	SinceMinutes int
+	Limit        int
 }
 
 type PlannerDecision struct {
@@ -66,6 +92,18 @@ func (d PlannerDecision) Validate() error {
 		case "query_gpu_processes":
 			if d.Arguments.QueryGPUProcesses == nil || d.Arguments.QueryGPUProcesses.GPUID == "" {
 				return invalid("decision.arguments", "query_gpu_processes requires gpu_id")
+			}
+		case "query_driver_status":
+			if d.Arguments.QueryDriverStatus == nil {
+				return invalid("decision.arguments", "does not match query_driver_status")
+			}
+		case "query_xid_events":
+			if d.Arguments.QueryXIDEvents == nil || d.Arguments.QueryXIDEvents.GPUID == "" {
+				return invalid("decision.arguments", "query_xid_events requires gpu_id")
+			}
+		case "query_recent_kernel_logs":
+			if d.Arguments.QueryRecentKernelLogs == nil || d.Arguments.QueryRecentKernelLogs.GPUID == "" {
+				return invalid("decision.arguments", "query_recent_kernel_logs requires gpu_id")
 			}
 		default:
 			return invalid("decision.tool_name", "tool is not registered")
