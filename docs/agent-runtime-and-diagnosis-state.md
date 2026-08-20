@@ -14,10 +14,10 @@
 - `ObservedFact`、`EvidenceRef` 与 `DiagnosisReport` 如何关联；
 - 报告生成、确定性校验、LLM 语义推断与人工决策的边界；
 - `DiagnosisState` 的生命周期和第一版 Go 包结构；
-- 第一条高显存闭环的已实现状态；
-- 下一条 Xid / 掉卡诊断切片的数据契约、路径和验收边界。
+- 高显存与 Xid / 掉卡两条闭环的已实现状态；
+- 下一阶段进入高温场景、最小 SOP Router 和受限 LLM Planner 前的门槛。
 
-本文档记录当前架构共识和已经进入 Go 编码验证的第一版协议。高显存确定性闭环已经通过 CLI、单元测试、race 检查和静态检查；后续新增工具和场景应复用现有协议。字段名和文件拆分仍可根据编译与测试结果小幅调整，但安全边界、证据语义、Planner 权限和报告责任不能作为普通实现细节随意改变。
+本文档记录当前架构共识和已经进入 Go 编码验证的第一版协议。高显存与 Xid / 掉卡两条确定性闭环均已通过 CLI、单元测试、race 检查和静态检查；后续新增工具和场景应复用现有协议。字段名和文件拆分仍可根据编译与测试结果小幅调整，但安全边界、证据语义、Planner 权限和报告责任不能作为普通实现细节随意改变。
 
 ## 2. 项目边界
 
@@ -977,13 +977,13 @@ ConfirmedFindings 只确认 GPU-0 的已用/总显存以及 PID-4321 的显存�
 
 测试通过注入固定 Clock 和 ID Generator 消除时间与 ID 的不确定性。
 
-截至当前版本，这条路径已经在 Go 中跑通，并通过单元测试、race 检查、`go vet`、CLI 构建和端到端确定性测试。它是后续场景复用的基线，不应在扩展 Xid 场景时重写。
+截至当前版本，这条路径已经在 Go 中跑通，并通过单元测试、race 检查、`go vet`、CLI 构建和端到端确定性测试。它是后续场景复用的基线，不应在扩展其他场景时重写。
 
-## 22. 下一条 Xid / 掉卡诊断切片
+## 22. 已实现的第二条 Xid / 掉卡诊断切片
 
 ### 22.1 为什么先实现这一条
 
-Xid / 掉卡场景比继续接入 LLM 更优先。当前只有两个工具和一个高显存分支，LLM 即使接入也几乎只能复述固定路径，无法证明动态调查的价值。
+实现 Xid / 掉卡场景时没有直接接入 LLM，因为当时只有两个工具和一个高显存分支，LLM 即使接入也几乎只能复述固定路径，无法证明动态调查的价值。
 
 Xid 切片可以在不改变现有架构的情况下验证：
 
@@ -992,7 +992,7 @@ Xid 切片可以在不改变现有架构的情况下验证：
 - 多个 Observation 产生的 Fact 能否共同支持一个有限推断；
 - 系统能否确认可观察事件，同时拒绝推断永久硬件损坏或自动执行恢复动作。
 
-本切片仍使用 Deterministic Planner。它的目标是把底层能力和分支测试稳定下来，不在同一切片中同时引入 LLM 不确定性。
+本切片已经使用 Deterministic Planner 跑通。它稳定了底层能力和分支测试，没有在同一切片中同时引入 LLM 不确定性。
 
 ### 22.2 端到端运行路径
 
@@ -1323,7 +1323,7 @@ host rebooted
 
 ### 22.10 自动测试验收
 
-编码至少覆盖：
+当前实现和测试已经覆盖：
 
 1. 新 Mock 字段和跨工具引用的一致性校验；
 2. unavailable GPU 不生成伪造的实时指标 Fact；
@@ -1339,7 +1339,7 @@ host rebooted
 
 ### 22.11 LLM 接入门槛
 
-完成 Xid 切片后仍不立即删除 Deterministic Planner。先补一个高温或未知异常分支，并实现最小 SOP Router，使同类模糊告警在不同 Mock 状态下存在多个合法调查方向。之后再设计实际 `PlannerContext` JSON，并在现有 `Planner` 接口后增加 LLM 实现。
+Xid 切片完成后仍不删除 Deterministic Planner。下一步先补高温或未知异常分支，再实现最小 SOP Router，使同类模糊告警在不同 Mock 状态下存在多个合法调查方向。之后再设计实际 `PlannerContext` JSON，并在现有 `Planner` 接口后增加 LLM 实现。
 
 接入 LLM 时，现有 Orchestrator、Policy、Scope、预算、工具执行、Fact 生成、Evidence 校验和报告安全边界保持不变；LLM 只获得选择下一项白名单检查或建议结束/升级的权限。
 
@@ -1355,35 +1355,44 @@ host rebooted
 
 如果实现发现必须改变安全边界、证据语义、Planner 权限或报告责任，应停止编码并重新讨论，不能把它当作普通实现细节自行修改。
 
-## 24. 下一轮编码起点
+## 24. 新对话交接与下一轮起点
 
 开始下一轮编码前先阅读：
 
 1. 项目总纲 `AGENTS.md`；
 2. 本文档 `docs/agent-runtime-and-diagnosis-state.md`。
 
-下一步不再扩展整体架构，按第 22 节直接实现 Xid 切片：
+开始工作时先运行：
 
-```text
-扩展 GPU availability、Driver、XIDEvent、KernelLogEntry
-→ 先写 Mock 一致性与非法组合测试
-→ 扩展三个专属 ToolArguments 和 ObservationData
-→ 实现 query_driver_status / query_xid_events / query_recent_kernel_logs
-→ 校准执行预算耗尽后的 finish / escalate 语义
-→ 扩展 Deterministic Planner 的 Xid 分支
-→ 扩展证据报告与禁止声明校验
-→ 用 Xid 场景跑通 CLI 与端到端测试
+```bash
+git status --short
+go test ./...
+go test -race ./...
+go vet ./...
 ```
 
-下一条完整演示路径：
+当前已经实现并验证：
 
 ```text
-模糊 GPU 异常告警
-→ query_gpu_status
-→ 发现 GPU-0 unavailable
-→ query_driver_status
-→ query_xid_events(GPU-0)
-→ query_recent_kernel_logs(GPU-0)
-→ 生成跨 Observation 的 Fact/Evidence 报告
-→ 不确认永久硬件损坏，不执行任何恢复操作
+high-memory:
+  gpu_status → gpu_processes → finish
+
+xid-drop:
+  gpu_status → driver_status → xid_events → kernel_logs → finish
 ```
+
+下一项具体工作不是接入 LLM，而是对第三条高温场景做一个小切片设计并立即编码：
+
+```text
+定义高温 Mock 的机器事实与一致性约束
+→ 定义需要复用或新增的只读工具 Data 和 Fact Keys
+→ 明确温度阈值只是本地演示规则
+→ 明确报告可确认项、有限推断和未知项
+→ 先写模型与 Mock 非法组合测试
+→ 扩展 Deterministic Planner、报告和 CLI
+→ 验证同类模糊告警在不同 Mock 下选择不同路径
+```
+
+设计高温切片时先判断现有 `query_gpu_status` 和 `query_recent_kernel_logs` 是否足够。只有确实需要新的机器事实时才增加 `query_host_resources`；不得为了增加工具数量而增加与结论无关的查询。
+
+高温路径通过后，再实现最小 SOP Router。LLM Planner 的接入门槛和不允许接管的确定性责任见第 22.11 节与 `AGENTS.md` 第 11.5 节。

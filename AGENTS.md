@@ -293,9 +293,9 @@ MVP 最多保留 `info`、`warning`、`critical` 等技术等级，仅根据 GPU
 
 ## 11. 当前阶段与后续推进顺序
 
-### 11.1 已完成的设计阶段
+### 11.1 已实现并验证的基础协议
 
-只读诊断 MVP 范围和第一条高显存演示路径已经固定。以下核心协议已经完成讨论，不应在编码时无理由重新发明：
+只读诊断 MVP 的运行主干已经完成 Go 编码验证。以下协议已有实现和测试，不应在后续场景中无理由重新发明：
 
 - Alert 与经过校验的 Scope 分离，第一版单 Target 由 Orchestrator 从 Scope 注入；
 - PlannerDecision、ToolCall、Observation、ObservedFact、EvidenceRef 和 DiagnosisReport 的责任与 ID 关联；
@@ -304,37 +304,108 @@ MVP 最多保留 `info`、`warning`、`critical` 等技术等级，仅根据 GPU
 - ToolCall/Observation 状态、固定错误码、调用指纹、有限重试和外部预算；
 - DiagnosisState 的追加式历史、动态派生计数和生命周期；
 - ConfirmedFinding、Inference、Unknown、Recommendation 的报告边界；
-- 统一 Mock、高显存确定性路径和自动测试验收标准。
+- 统一 Mock、确定性 Planner、Policy、Loop Guard、证据化报告和 CLI 依赖组装；
+- 执行预算耗尽后禁止新工具调用，但仍允许 Planner 提交不执行工具的 `finish` 或 `escalate`；
+- 固定 Clock 和 ID Generator 保证同一场景得到稳定路径、Facts 和报告。
 
 详细字段、默认限制、Mock 数值和测试条件以 `docs/agent-runtime-and-diagnosis-state.md` 为唯一设计来源。`AGENTS.md` 只保留项目总纲与协作边界，避免复制出第二份容易漂移的协议。
 
-### 11.2 当前编码切片
+### 11.2 已实现并验证的场景
 
-新对话不再继续横向扩展架构，直接进入第一版 Go 编码验证：
+当前已有两条可通过 CLI 重复运行的确定性调查路径。
+
+高显存场景：
 
 ```text
-初始化 go.mod 和最小目录
-→ 定义 model、枚举、构造函数和 Validate
-→ 先写模型不变量与非法组合测试
-→ 实现统一 Mock Machine State
-→ 实现 query_gpu_status / query_gpu_processes
-→ 实现 Deterministic Planner
-→ 实现 Orchestrator、Policy 和 Loop Guard
-→ 生成并校验最小 DiagnosisReport
-→ 用高显存场景跑通 CLI 与自动测试
+gpu_abnormal
+→ query_gpu_status
+→ query_gpu_processes(GPU-0)
+→ finish
 ```
 
-第一条路径只允许形成以下有限结论：确认 GPU-0 高显存现象和 PID-4321 是本次观察中的主要直接占用来源。不得据此确认内存泄漏，不得决定或执行终止进程，也不得增加任何状态修改工具。
+它只确认 GPU-0 的高显存快照和 PID-4321 是本次观察中的主要直接占用来源，不确认内存泄漏。
 
-编码阶段可以根据 Go 编译、序列化和测试结果微调字段名、文件拆分、构造函数名称和错误包装；如果必须改变安全边界、证据语义、Planner 权限、报告责任或第一条验收路径，应停止编码并先重新讨论。
+Xid / 掉卡场景：
 
-### 11.3 第一条闭环之后
+```text
+gpu_abnormal
+→ query_gpu_status
+→ query_driver_status
+→ query_xid_events(GPU-0)
+→ query_recent_kernel_logs(GPU-0)
+→ finish
+```
 
-第一条闭环通过测试后，再按以下顺序推进：
+它确认 GPU-0 unavailable、驱动/NVML 可用、Xid 79 和对应 NVRM 日志，只有限推断现象与 GPU-0 的主机通信丢失一致，不确认永久硬件损坏或具体物理根因。
 
-1. 补齐其余 5～8 个只读语义化工具和对应强类型结果；
-2. 扩展统一 Mock Machine State 和其余四个场景；
-3. 定义约 3 个最小结构化 SOP，并复用同一工具、State、Evidence 和 Report 基础设施；
-4. 增加更多策略拦截、失败路径、证据校验和 Loop Guard 测试；
-5. 在确定性闭环稳定后接入受限 LLM Planner；
-6. 最后整理 README、架构图、演示脚本、项目讲解和常见面试追问。
+当前 Tool Registry 只有五个只读语义化工具：
+
+```text
+query_gpu_status
+query_gpu_processes
+query_driver_status
+query_xid_events
+query_recent_kernel_logs
+```
+
+以下失败和安全分支已有自动测试：Scope 外 GPU、越界参数、重复调用、执行预算、连续策略拒绝、连续工具失败、无效 Planner 输出、驱动/NVML 不可用、Xid/日志为空、Xid 与日志不匹配、EvidenceRef 悬空和越权恢复声明。
+
+运行入口：
+
+```bash
+go run ./cmd/gpu-agent --scenario high-memory
+go run ./cmd/gpu-agent --scenario xid-drop
+```
+
+全量验证命令：
+
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+### 11.3 当前明确未实现
+
+不得把以下内容描述为已经完成：
+
+- 高温、正常和未知异常场景；
+- `query_gpu_topology`、`query_host_resources` 等其余只读工具；
+- SOP Router 和结构化 SOP Runner；
+- `PlannerContext` 的实际 JSON 裁剪与序列化；
+- 真实 LLM Provider、结构化输出解析、重试和 LLM Planner；
+- LLM Planner 与 Deterministic Planner 的对照评测；
+- 真实 GPU、SSH、生产告警或生产日志接入。
+
+### 11.4 新对话的下一项工作
+
+新对话不要直接接入 LLM，也不要重新设计已经实现的运行协议。下一项工作是设计并实现第三条高温诊断切片，使同类模糊告警具有另一条有证据支持的调查路径。
+
+建议顺序：
+
+```text
+先阅读 AGENTS.md 和 docs/agent-runtime-and-diagnosis-state.md
+→ 检查当前 main、工作区和全量测试
+→ 小范围设计高温场景的统一 Mock 字段、工具 Data、Facts 和报告边界
+→ 判断复用 query_recent_kernel_logs 是否足够，或是否确有必要增加 query_host_resources
+→ 先写模型/Mock 不变量测试
+→ 实现高温 Deterministic Planner 分支和报告
+→ 跑通 CLI 与端到端测试
+→ 再设计最小 SOP Router，并复用同一 Tool、State、Evidence 和 Report 基础设施
+```
+
+高温切片不得把单次温度高直接写成硬件故障，也不得猜测租户业务影响。阈值仍只能标记为本地稳定演示规则。
+
+### 11.5 何时接入 LLM
+
+至少满足以下条件后再接入受限 LLM Planner：
+
+1. 高显存、Xid/掉卡和高温三条确定性路径均通过测试；
+2. 至少一个结构化 SOP 与通用调查路径复用相同工具和证据基础设施；
+3. 同类模糊告警在不同 Mock State 下会产生不同、合理的调查路径；
+4. `PlannerContext` 能只暴露 Scope 内、裁剪后的 Observation 和剩余预算；
+5. 已有评测可以判断工具选择、重复调用、终止和报告是否合格。
+
+接入时只新增一个实现现有 `Planner` 接口的 LLM Planner。Orchestrator、Policy、Scope、工具执行、预算、Fact 生成、Evidence 校验和报告安全边界继续由确定性程序控制。
+
+编码阶段可以根据 Go 编译、序列化和测试结果微调字段名、文件拆分、构造函数名称和错误包装；如果必须改变安全边界、证据语义、Planner 权限、报告责任或既有验收路径，应停止编码并先重新讨论。
