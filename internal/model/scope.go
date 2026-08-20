@@ -41,3 +41,18 @@ func (s Scope) Validate() error {
 	}
 	return nil
 }
+
+func (s Scope) AllowsGPU(gpuID string) bool {
+	if gpuID == "" {
+		return false
+	}
+	if s.GPUAccessMode == GPUAccessAll {
+		return true
+	}
+	for _, allowed := range s.AllowedGPUs {
+		if allowed == gpuID {
+			return true
+		}
+	}
+	return false
+}
