@@ -14,9 +14,10 @@
 - `ObservedFact`、`EvidenceRef` 与 `DiagnosisReport` 如何关联；
 - 报告生成、确定性校验、LLM 语义推断与人工决策的边界；
 - `DiagnosisState` 的生命周期和第一版 Go 包结构；
-- 下一轮讨论应该从哪里继续。
+- 第一条高显存闭环的已实现状态；
+- 下一条 Xid / 掉卡诊断切片的数据契约、路径和验收边界。
 
-本文档记录的是当前架构共识和第一版候选协议。项目尚未进入 Go 编码验证，因此字段名和类型仍可在实现时做小幅调整，不能将其视为已经测试过的稳定接口。
+本文档记录当前架构共识和已经进入 Go 编码验证的第一版协议。高显存确定性闭环已经通过 CLI、单元测试、race 检查和静态检查；后续新增工具和场景应复用现有协议。字段名和文件拆分仍可根据编译与测试结果小幅调整，但安全边界、证据语义、Planner 权限和报告责任不能作为普通实现细节随意改变。
 
 ## 2. 项目边界
 
@@ -886,7 +887,7 @@ scenarios/           可重复运行的 Mock 场景数据
 
 Orchestrator 依赖 Planner、ToolExecutor 和 ReportBuilder 接口，不绑定具体 Mock 或 LLM 实现。`main.go` 负责创建具体实现并注入 Orchestrator。
 
-第一版先实现 Deterministic Planner，验证状态循环、工具调用、证据链、报告和终止机制；循环稳定后再替换或增加受限 LLM Planner。
+第一条高显存路径已经使用 Deterministic Planner 验证状态循环、工具调用、证据链、报告和终止机制。下一阶段先扩充少量只读工具、统一 Mock 场景和结构化 SOP；出现多个合法调查方向后，再在同一 Planner 接口后增加受限 LLM Planner。
 
 ## 20. 本轮确定的可编码协议
 
@@ -915,7 +916,7 @@ Orchestrator 依赖 Planner、ToolExecutor 和 ReportBuilder 接口，不绑定�
 21. DiagnosisState 保存源数据和追加式历史；PlannerRounds、ExecutionAttempts、RejectedCalls、连续失败和剩余预算均从历史动态计算。
 22. 报告严格区分 ConfirmedFinding、Inference、Unknown 和 Recommendation；固定模板优先生成已确认事实，未知项可以引用失败 ToolCall 和 Observation。
 
-## 21. 第一条高显存编码验收场景
+## 21. 已实现的第一条高显存编码验收场景
 
 第一条路径使用模糊主机级 GPU 告警：
 
@@ -976,7 +977,373 @@ ConfirmedFindings 只确认 GPU-0 的已用/总显存以及 PID-4321 的显存�
 
 测试通过注入固定 Clock 和 ID Generator 消除时间与 ID 的不确定性。
 
-## 22. 编码阶段允许通过测试微调的内容
+截至当前版本，这条路径已经在 Go 中跑通，并通过单元测试、race 检查、`go vet`、CLI 构建和端到端确定性测试。它是后续场景复用的基线，不应在扩展 Xid 场景时重写。
+
+## 22. 下一条 Xid / 掉卡诊断切片
+
+### 22.1 为什么先实现这一条
+
+Xid / 掉卡场景比继续接入 LLM 更优先。当前只有两个工具和一个高显存分支，LLM 即使接入也几乎只能复述固定路径，无法证明动态调查的价值。
+
+Xid 切片可以在不改变现有架构的情况下验证：
+
+- 同一个统一 Mock 中，设备状态、驱动、Xid 事件和内核日志能否保持一致；
+- Planner 能否根据前一项 Observation 决定后续检查，而不是固定采集所有信息；
+- 多个 Observation 产生的 Fact 能否共同支持一个有限推断；
+- 系统能否确认可观察事件，同时拒绝推断永久硬件损坏或自动执行恢复动作。
+
+本切片仍使用 Deterministic Planner。它的目标是把底层能力和分支测试稳定下来，不在同一切片中同时引入 LLM 不确定性。
+
+### 22.2 端到端运行路径
+
+第二条演示仍从模糊主机级告警开始：
+
+```text
+Mock Alert(gpu_abnormal)
+→ query_gpu_status
+→ Observation: GPU-0 当前 unavailable，GPU-1 online
+→ query_driver_status
+→ Observation: 驱动已加载且 NVML 可用
+→ query_xid_events(GPU-0, 最近 30 分钟)
+→ Observation: GPU-0 出现 Xid 79
+→ query_recent_kernel_logs(GPU-0, 最近 30 分钟)
+→ Observation: 内核日志存在与 GPU-0/Xid 79 对应的 NVRM 事件
+→ finish
+→ 输出事实、有限推断、未知项和人工建议
+```
+
+这里的判断边界是：驱动全局可用、GPU-1 仍在线，而 GPU-0 当前不可用并出现 Xid 79，因此现有证据与 GPU-0 的主机通信丢失一致。系统不能据此确认 GPU-0 已永久损坏，也不能决定或执行 reset、驱动重载、节点隔离或重启。
+
+具体一轮运行如下：
+
+```text
+Round 1: Planner 请求 query_gpu_status
+Round 2: 根据 GPU-0 unavailable，请求 query_driver_status
+Round 3: 根据驱动已加载且 NVML 可用，请求 query_xid_events(GPU-0)
+Round 4: 根据 Xid 79，请求 query_recent_kernel_logs(GPU-0)
+Round 5: 证据足够，finish
+```
+
+预期计数：
+
+```text
+Status = finished
+TerminationReason = evidence_sufficient
+Outcome = issue_identified
+PlannerRounds = 5
+ExecutionAttempts = 4
+RejectedCalls = 0
+```
+
+`MaxExecutionAttempts=4` 表示最多允许四次实际工具执行，不应阻止第四次执行完成后由 Planner 提交不执行工具的 `finish` 或 `escalate`。实现本切片时需要用测试校准当前 Loop Guard：预算为零时禁止新的 `call_tool`，但仍允许形成终止决策。
+
+### 22.3 统一 Mock Machine State 扩展
+
+现有 `MachineState` 继续作为所有工具的唯一真相来源，不为每个工具分别准备互不相关的返回值。新增概念结构为：
+
+```text
+MachineState
+├── TargetID
+├── GPUs map[GPUID]GPU
+├── Processes []Process
+├── Driver DriverState
+├── XIDEvents []XIDEvent
+└── KernelLogs []KernelLogEntry
+```
+
+`GPU` 增加机器可观察的可用状态：
+
+```text
+GPU
+├── ID
+├── Availability: online | unavailable
+├── MemoryTotalMB
+├── MemoryUsedMB
+├── Utilization
+└── TemperatureC
+```
+
+`Availability` 只描述当前查询是否能够访问该设备，不直接表达“健康”“损坏”或根因。`online` 时现有数值字段必须满足范围约束；`unavailable` 时数值字段不作为有效测量，统一为零，防止报告同时声称“设备不可访问”又引用看似精确的实时利用率。
+
+驱动状态：
+
+```text
+DriverState
+├── Loaded bool
+├── Version string
+└── NVMLAvailable bool
+```
+
+约束：`Loaded=false` 时 `Version` 必须为空且 `NVMLAvailable=false`；`Loaded=true` 时 `Version` 必须非空。驱动已加载不等于所有 GPU 正常，NVML 可用也不等于单个设备一定可访问。
+
+Xid 事件：
+
+```text
+XIDEvent
+├── ID
+├── GPUID
+├── Code int
+├── OccurredAt time.Time
+└── Summary string
+```
+
+内核日志：
+
+```text
+KernelLogEntry
+├── ID
+├── GPUID
+├── OccurredAt time.Time
+├── Severity: info | warning | error
+├── Component string
+├── Message string
+└── RelatedXIDCode *int
+```
+
+Mock 校验至少保证：
+
+- Xid 和 KernelLog 引用的 GPU 必须存在于同一 `GPUs` 清单；
+- ID 唯一、时间非零、Xid code 为正数；
+- `RelatedXIDCode` 非空时，必须能与同一 GPU、相近时间窗口内的 Xid 事件对应；
+- 查询结果按 `OccurredAt` 倒序、ID 次序做稳定排序；
+- 高显存场景也补齐正常 DriverState，但不伪造 Xid 或错误日志。
+
+### 22.4 第二条具体 Mock 场景
+
+```text
+AlertID: alert-xid-001
+TargetID: host-01
+GPUID: 未指定
+Type: gpu_abnormal
+Severity: critical
+Message: One registered GPU is unavailable
+```
+
+校验后仍生成：
+
+```text
+Scope(TargetID=host-01, GPUAccessMode=all)
+```
+
+Mock 状态固定为：
+
+```text
+GPU-0: availability=unavailable, metrics=0
+GPU-1: availability=online, total=24576 MiB, used=1200 MiB,
+       utilization=15%, temperature=46 C
+
+Driver: loaded=true, version=550.54.15, nvml_available=true
+
+XIDEvent:
+  id=xid-event-001
+  gpu_id=GPU-0
+  code=79
+  occurred_at=2026-08-20T09:58:00+08:00
+  summary="GPU has fallen off the bus"
+
+KernelLogEntry:
+  id=kernel-log-001
+  gpu_id=GPU-0
+  occurred_at=2026-08-20T09:58:01+08:00
+  severity=error
+  component=NVRM
+  related_xid_code=79
+  message="NVRM reported Xid 79 for GPU-0"
+```
+
+这些固定值用于稳定演示和测试，不代表生产环境下 Xid 79 只有一种根因。
+
+### 22.5 新增工具参数与策略边界
+
+三个工具都由 Orchestrator 从 Scope 注入 `TargetID`，Planner 不填写 Target，也不能提供命令、日志路径、正则表达式或任意过滤字符串。
+
+```text
+QueryDriverStatusArgs
+  无 Planner 参数
+
+QueryXIDEventsArgs
+├── GPUID string          # 必填，必须属于 Scope
+├── SinceMinutes int      # 1..1440
+└── Limit int             # 1..100
+
+QueryRecentKernelLogsArgs
+├── GPUID string          # 必填，必须属于 Scope
+├── SinceMinutes int      # 1..1440
+└── Limit int             # 1..200
+```
+
+第一条 Xid 演示使用：
+
+```text
+query_xid_events(GPU-0, since_minutes=30, limit=20)
+query_recent_kernel_logs(GPU-0, since_minutes=30, limit=50)
+```
+
+时间范围相对于本次运行注入的固定 Clock 计算。规范化后的参数进入 `ExecutedArguments` 和调用指纹；越界参数、Scope 外 GPU、重复成功调用继续由 Policy 拒绝并保留审计记录。
+
+### 22.6 ObservationData 强类型扩展
+
+`ObservationData` 显式增加三个互斥载荷：
+
+```text
+ObservationData
+├── Type: gpu_status | gpu_processes | driver_status | xid_events | kernel_logs
+├── GPUStatusData
+├── GPUProcessesData
+├── DriverStatusData
+├── XIDEventsData
+└── KernelLogsData
+```
+
+新增 Data：
+
+```text
+DriverStatusData
+├── Loaded bool
+├── Version string
+└── NVMLAvailable bool
+
+XIDEventsData
+├── GPUID string
+├── SinceMinutes int
+└── Events []XIDEvent
+
+KernelLogsData
+├── GPUID string
+├── SinceMinutes int
+└── Entries []KernelLogEntry
+```
+
+仍保持“任何时刻只有一个专属 Data 非空，且必须与 Type 对应”的不变量。
+
+### 22.7 可引用 ObservedFact
+
+工具 Adapter 只生成预先定义的 Key，不允许 Planner 或 LLM 临时创建：
+
+```text
+query_gpu_status
+  Subject=gpu/<GPUID>
+  availability              text
+  memory_total_mb           integer, MiB   # 仅 online 时生成
+  memory_used_mb            integer, MiB   # 仅 online 时生成
+  utilization_percent       decimal, %     # 仅 online 时生成
+  temperature_c             decimal, C     # 仅 online 时生成
+
+query_driver_status
+  Subject=driver/nvidia
+  loaded                    boolean
+  version                   text           # 仅 loaded 时生成
+  nvml_available            boolean
+
+query_xid_events
+  Subject=xid_event/<EventID>
+  gpu_id                     text
+  code                       integer
+  occurred_at                text, RFC3339
+  summary                    text
+
+query_recent_kernel_logs
+  Subject=kernel_log/<EntryID>
+  gpu_id                     text
+  occurred_at                text, RFC3339
+  severity                   text
+  component                  text
+  message                    text
+  related_xid_code           integer        # 仅有关联值时生成
+```
+
+`availability=unavailable` 是工具观察事实；“GPU 永久损坏”不是 Fact。`Xid code=79` 和对应日志是事件事实；“需要换卡”不是 Fact。
+
+### 22.8 Planner 分支规则
+
+本切片的 Deterministic Planner 只增加足以演示的规则：
+
+```text
+尚无 GPU status
+  → query_gpu_status
+
+存在 unavailable GPU，尚无 driver status
+  → query_driver_status
+
+driver loaded 且 NVML available，目标 GPU 尚无 Xid 查询
+  → query_xid_events
+
+发现 Xid 事件，尚无对应 kernel log 查询
+  → query_recent_kernel_logs
+
+Xid 与日志相互印证
+  → finish
+
+driver 未加载或 NVML 不可用
+  → 不继续伪装成可读取单 GPU Xid；整理驱动事实并 escalate
+
+Xid 与日志均没有提供足够证据
+  → 明确 unknown 并 escalate
+```
+
+如果多个 GPU 同时 unavailable，第一版不自行选择任意一个深入调查，而是按稳定 GPU ID 顺序并结合剩余预算处理；预算不足以覆盖时必须升级人工，不能把未调查设备写成正常。
+
+### 22.9 报告允许与禁止的内容
+
+`ConfirmedFindings` 可以写：
+
+- GPU-0 在本次状态查询中为 `unavailable`；
+- NVIDIA 驱动已加载、版本为 `550.54.15`、NVML 可用；
+- GPU-0 在指定时间窗口内出现 Xid 79；
+- 内核日志存在与 GPU-0、Xid 79 对应的 NVRM 事件。
+
+`Inferences` 可以有限写：
+
+- 多项证据与 GPU-0 在该时刻发生主机通信丢失一致；
+- 由于驱动和 GPU-1 仍可用，现象更集中于 GPU-0，而不是已经确认的全局驱动失效。
+
+`Unknowns` 必须保留：
+
+- GPU-0 是否永久硬件损坏；
+- 故障由硬件、PCIe 链路、供电、驱动或其他因素中的哪一种造成；
+- 租户实际业务影响；
+- reset、驱动重载或重启是否能够安全恢复。
+
+`Recommendations` 只能建议人工：
+
+- 复核租户任务和节点影响；
+- 按正式运维流程评估隔离、迁移、reset、驱动处理或硬件检查；
+- 在采取任何状态修改前保存并复核本次证据。
+
+报告禁止声称：
+
+```text
+GPU-0 permanently failed
+hardware replacement required
+GPU reset completed
+driver reloaded
+node isolated
+host rebooted
+```
+
+### 22.10 自动测试验收
+
+编码至少覆盖：
+
+1. 新 Mock 字段和跨工具引用的一致性校验；
+2. unavailable GPU 不生成伪造的实时指标 Fact；
+3. 三个工具的专属参数类型、范围规范化和 Scope 拒绝；
+4. 工具 Registry 仍然只包含只读语义化工具；
+5. 精确路径为 `gpu_status → driver_status → xid_events → kernel_logs → finish`；
+6. 第四次执行后仍允许 Planner 形成 `finish`，但不允许第五次工具执行；
+7. Policy 拒绝不产生 Observation，工具失败才产生失败 Observation；
+8. Xid、日志和报告的每个 EvidenceRef 都解析到正确 Fact；
+9. 报告不确认永久损坏，不声称执行恢复动作；
+10. 驱动不可用、无 Xid、日志不匹配等分支能够形成 Unknown 或 escalate；
+11. 同一 Alert 与 Mock State 重复运行得到相同路径、Facts 和报告。
+
+### 22.11 LLM 接入门槛
+
+完成 Xid 切片后仍不立即删除 Deterministic Planner。先补一个高温或未知异常分支，并实现最小 SOP Router，使同类模糊告警在不同 Mock 状态下存在多个合法调查方向。之后再设计实际 `PlannerContext` JSON，并在现有 `Planner` 接口后增加 LLM 实现。
+
+接入 LLM 时，现有 Orchestrator、Policy、Scope、预算、工具执行、Fact 生成、Evidence 校验和报告安全边界保持不变；LLM 只获得选择下一项白名单检查或建议结束/升级的权限。
+
+## 23. 编码阶段允许通过测试微调的内容
 
 架构取舍已经收口。编码时只允许在不改变上述边界的前提下微调：
 
@@ -988,34 +1355,35 @@ ConfirmedFindings 只确认 GPU-0 的已用/总显存以及 PID-4321 的显存�
 
 如果实现发现必须改变安全边界、证据语义、Planner 权限或报告责任，应停止编码并重新讨论，不能把它当作普通实现细节自行修改。
 
-## 23. 新对话编码起点
+## 24. 下一轮编码起点
 
-新对话先阅读：
+开始下一轮编码前先阅读：
 
 1. 项目总纲 `AGENTS.md`；
 2. 本文档 `docs/agent-runtime-and-diagnosis-state.md`。
 
-下一步不再继续扩展架构讨论，直接进入第一版 Go 编码验证：
+下一步不再扩展整体架构，按第 22 节直接实现 Xid 切片：
 
 ```text
-初始化 go.mod 和目录
-→ 定义最小 model 类型与枚举
-→ 实现统一 Mock Machine State
-→ 实现 query_gpu_status / query_gpu_processes
-→ 实现 Deterministic Planner
-→ 实现 Orchestrator 和 Loop Guard
-→ 生成并校验最小 DiagnosisReport
-→ 用高显存场景跑通 CLI 与测试
+扩展 GPU availability、Driver、XIDEvent、KernelLogEntry
+→ 先写 Mock 一致性与非法组合测试
+→ 扩展三个专属 ToolArguments 和 ObservationData
+→ 实现 query_driver_status / query_xid_events / query_recent_kernel_logs
+→ 校准执行预算耗尽后的 finish / escalate 语义
+→ 扩展 Deterministic Planner 的 Xid 分支
+→ 扩展证据报告与禁止声明校验
+→ 用 Xid 场景跑通 CLI 与端到端测试
 ```
 
-第一条完整演示路径：
+下一条完整演示路径：
 
 ```text
 模糊 GPU 异常告警
 → query_gpu_status
-→ 发现 GPU-0 高显存
-→ query_gpu_processes
-→ 定位 PID-4321 为主要直接占用来源
-→ 生成带 Fact/Evidence 引用的报告
-→ 不推断内存泄漏，不执行终止进程
+→ 发现 GPU-0 unavailable
+→ query_driver_status
+→ query_xid_events(GPU-0)
+→ query_recent_kernel_logs(GPU-0)
+→ 生成跨 Observation 的 Fact/Evidence 报告
+→ 不确认永久硬件损坏，不执行任何恢复操作
 ```
