@@ -231,3 +231,25 @@ func TestMissingXIDEvidenceEscalatesAfterBoundedQueries(t *testing.T) {
 		t.Fatalf("unexpected missing-evidence branch: termination=%s rounds=%d attempts=%d", finalState.Termination.Reason, finalState.PlannerRounds(), finalState.ExecutionAttempts())
 	}
 }
+
+func TestMismatchedKernelEvidenceEscalates(t *testing.T) {
+	scenario := mock.XIDScenario()
+	scenario.Machine.KernelLogs[0].RelatedXIDCode = nil
+	if err := scenario.Validate(); err != nil {
+		t.Fatalf("mismatch scenario should remain structurally valid: %v", err)
+	}
+	state, err := model.NewDiagnosisState("diagnosis-xid-mismatch", scenario.Alert, scenario.Scope, model.DiagnosisMode{Type: model.DiagnosisModeGeneralAgent}, model.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := idgen.NewSequential()
+	clock := fixedClock{now: scenario.Now}
+	orchestrator := NewOrchestrator(planner.NewDeterministic(ids), tools.NewPolicy(tools.NewRegistry()), tools.NewExecutor(scenario.Machine, ids, tools.WithClock(clock)), testReporter{}, ids, clock)
+	finalState, _, err := orchestrator.Run(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalState.Termination.Reason != model.StopEscalated || finalState.ExecutionAttempts() != 4 {
+		t.Fatalf("mismatched evidence did not escalate: termination=%s attempts=%d", finalState.Termination.Reason, finalState.ExecutionAttempts())
+	}
+}
