@@ -160,3 +160,32 @@ func TestLoopGuardStopsConsecutiveToolFailures(t *testing.T) {
 		t.Fatalf("tool failures were not recorded as failed observations: %+v", finalState.Observations)
 	}
 }
+
+func TestOrchestratorAllowsFinishAfterFourthExecution(t *testing.T) {
+	scenario := mock.XIDScenario()
+	state, err := model.NewDiagnosisState("diagnosis-xid-001", scenario.Alert, scenario.Scope, model.DiagnosisMode{Type: model.DiagnosisModeGeneralAgent}, model.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := idgen.NewSequential()
+	clock := fixedClock{now: scenario.Now}
+	orchestrator := NewOrchestrator(
+		planner.NewDeterministic(ids),
+		tools.NewPolicy(tools.NewRegistry()),
+		tools.NewExecutor(scenario.Machine, ids, tools.WithClock(clock)),
+		testReporter{}, ids, clock,
+	)
+	finalState, _, err := orchestrator.Run(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalState.Termination.Reason != model.StopEvidenceSufficient || finalState.PlannerRounds() != 5 || finalState.ExecutionAttempts() != 4 {
+		t.Fatalf("unexpected Xid loop result: termination=%s rounds=%d attempts=%d", finalState.Termination.Reason, finalState.PlannerRounds(), finalState.ExecutionAttempts())
+	}
+	want := []string{tools.QueryGPUStatus, tools.QueryDriverStatus, tools.QueryXIDEvents, tools.QueryRecentKernelLogs}
+	for i, name := range want {
+		if finalState.ToolCalls[i].ToolName != name {
+			t.Fatalf("tool %d = %s, want %s", i, finalState.ToolCalls[i].ToolName, name)
+		}
+	}
+}

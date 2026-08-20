@@ -63,7 +63,9 @@ func (o Orchestrator) Run(ctx context.Context, state model.DiagnosisState) (mode
 
 		switch decision.Type {
 		case model.DecisionCallTool:
-			o.executeDecision(&state, decision)
+			if policyErr := o.executeDecision(&state, decision); policyErr != nil && policyErr.Code == model.ErrorExecutionBudgetExhausted {
+				stop(&state, model.StopExecutionBudgetExhausted, policyErr.Message)
+			}
 		case model.DecisionFinish:
 			if !evidenceExists(state, decision.EvidenceRefs) {
 				stop(&state, model.StopPlannerInvalidOutput, "finish decision referenced unavailable evidence")
@@ -89,7 +91,7 @@ func (o Orchestrator) Run(ctx context.Context, state model.DiagnosisState) (mode
 	return state, report, nil
 }
 
-func (o Orchestrator) executeDecision(state *model.DiagnosisState, decision model.PlannerDecision) {
+func (o Orchestrator) executeDecision(state *model.DiagnosisState, decision model.PlannerDecision) *model.RuntimeError {
 	call := model.ToolCall{
 		ID:                 o.ids.Next("call"),
 		DecisionID:         decision.ID,
@@ -103,7 +105,7 @@ func (o Orchestrator) executeDecision(state *model.DiagnosisState, decision mode
 		call.Status = model.ToolCallRejected
 		call.Error = policyErr
 		state.ToolCalls = append(state.ToolCalls, call)
-		return
+		return policyErr
 	}
 	call.ExecutedArguments = normalized
 	call.Fingerprint = fingerprint
@@ -117,6 +119,7 @@ func (o Orchestrator) executeDecision(state *model.DiagnosisState, decision mode
 	}
 	state.ToolCalls = append(state.ToolCalls, call)
 	state.Observations = append(state.Observations, observation)
+	return nil
 }
 
 func stop(state *model.DiagnosisState, reason model.StopReason, detail string) {
@@ -151,9 +154,6 @@ func forcedStop(ctx context.Context, state model.DiagnosisState, startedAt, now 
 	}
 	if state.PlannerRounds() >= state.Limits.MaxPlannerRounds {
 		return model.StopPlannerRoundsExhausted
-	}
-	if state.ExecutionAttempts() >= state.Limits.MaxExecutionAttempts {
-		return model.StopExecutionBudgetExhausted
 	}
 	if consecutiveStatus(state.ToolCalls, model.ToolCallRejected) >= state.Limits.MaxConsecutiveRejectedCalls {
 		return model.StopRepeatedPolicyRejection

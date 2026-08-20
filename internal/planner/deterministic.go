@@ -29,6 +29,10 @@ func (p Deterministic) Decide(state model.DiagnosisState) (model.PlannerDecision
 	}
 
 	highGPU := firstHighMemoryGPU(statusObservation)
+	unavailableGPU := firstUnavailableGPU(statusObservation)
+	if unavailableGPU != "" {
+		return p.decideUnavailableGPU(state, *statusObservation, unavailableGPU)
+	}
 	if highGPU == "" {
 		return model.PlannerDecision{
 			ID:           p.ids.Next("decision"),
@@ -56,6 +60,76 @@ func (p Deterministic) Decide(state model.DiagnosisState) (model.PlannerDecision
 		Type:         model.DecisionFinish,
 		Reason:       "high GPU memory usage and the largest direct process consumer have been observed",
 		EvidenceRefs: refs,
+	}, nil
+}
+
+func (p Deterministic) decideUnavailableGPU(state model.DiagnosisState, statusObservation model.Observation, gpuID string) (model.PlannerDecision, error) {
+	driverObservation := latestObservation(state, model.ObservationDataDriverStatus)
+	if driverObservation == nil {
+		return model.PlannerDecision{
+			ID:        p.ids.Next("decision"),
+			Type:      model.DecisionCallTool,
+			ToolName:  tools.QueryDriverStatus,
+			Arguments: model.ToolArguments{QueryDriverStatus: &model.QueryDriverStatusArgs{}},
+			Reason:    fmt.Sprintf("%s is unavailable; check whether the NVIDIA driver and NVML are globally available", gpuID),
+		}, nil
+	}
+	driver := driverObservation.Data.DriverStatus
+	statusRefs := refsForSubjectKeys(statusObservation, gpuID, "availability")
+	driverRefs := refsForSubjectKeys(*driverObservation, "nvidia", "loaded", "version", "nvml_available")
+	if !driver.Loaded || !driver.NVMLAvailable {
+		return model.PlannerDecision{
+			ID:           p.ids.Next("decision"),
+			Type:         model.DecisionEscalate,
+			Reason:       "driver or NVML is unavailable, so per-GPU Xid inspection cannot be treated as reliable",
+			EvidenceRefs: append(statusRefs, driverRefs...),
+			Unknowns:     []string{"GPU availability after driver recovery", "whether GPU-specific Xid events can be queried"},
+		}, nil
+	}
+
+	xidObservation := latestGPUObservation(state, model.ObservationDataXIDEvents, gpuID)
+	if xidObservation == nil {
+		return model.PlannerDecision{
+			ID:       p.ids.Next("decision"),
+			Type:     model.DecisionCallTool,
+			ToolName: tools.QueryXIDEvents,
+			Arguments: model.ToolArguments{QueryXIDEvents: &model.QueryXIDEventsArgs{
+				GPUID: gpuID, SinceMinutes: 30, Limit: 20,
+			}},
+			Reason: fmt.Sprintf("the driver is available; inspect recent Xid events for unavailable %s", gpuID),
+		}, nil
+	}
+
+	kernelObservation := latestGPUObservation(state, model.ObservationDataKernelLogs, gpuID)
+	if kernelObservation == nil {
+		return model.PlannerDecision{
+			ID:       p.ids.Next("decision"),
+			Type:     model.DecisionCallTool,
+			ToolName: tools.QueryRecentKernelLogs,
+			Arguments: model.ToolArguments{QueryRecentKernelLogs: &model.QueryRecentKernelLogsArgs{
+				GPUID: gpuID, SinceMinutes: 30, Limit: 50,
+			}},
+			Reason: fmt.Sprintf("correlate %s availability and Xid results with bounded recent kernel logs", gpuID),
+		}, nil
+	}
+
+	refs := append(statusRefs, driverRefs...)
+	refs = append(refs, refsForAllFacts(*xidObservation)...)
+	refs = append(refs, refsForAllFacts(*kernelObservation)...)
+	if hasMatchingXIDLog(*xidObservation, *kernelObservation) {
+		return model.PlannerDecision{
+			ID:           p.ids.Next("decision"),
+			Type:         model.DecisionFinish,
+			Reason:       "GPU unavailability, Xid event, and matching kernel evidence are sufficient for a bounded finding",
+			EvidenceRefs: refs,
+		}, nil
+	}
+	return model.PlannerDecision{
+		ID:           p.ids.Next("decision"),
+		Type:         model.DecisionEscalate,
+		Reason:       "the bounded Xid and kernel queries did not provide mutually supporting evidence",
+		EvidenceRefs: refs,
+		Unknowns:     []string{"the cause of the unavailable GPU", "whether relevant events occurred outside the bounded time window"},
 	}, nil
 }
 
@@ -89,11 +163,78 @@ func firstHighMemoryGPU(observation *model.Observation) string {
 		return ""
 	}
 	for _, gpu := range observation.Data.GPUStatus.GPUs {
-		if gpu.MemoryTotalMB > 0 && float64(gpu.MemoryUsedMB)/float64(gpu.MemoryTotalMB) >= highMemoryRatio {
+		if gpu.Availability == model.GPUOnline && gpu.MemoryTotalMB > 0 && float64(gpu.MemoryUsedMB)/float64(gpu.MemoryTotalMB) >= highMemoryRatio {
 			return gpu.GPUID
 		}
 	}
 	return ""
+}
+
+func firstUnavailableGPU(observation *model.Observation) string {
+	if observation == nil || observation.Data == nil || observation.Data.GPUStatus == nil {
+		return ""
+	}
+	for _, gpu := range observation.Data.GPUStatus.GPUs {
+		if gpu.Availability == model.GPUUnavailable {
+			return gpu.GPUID
+		}
+	}
+	return ""
+}
+
+func latestGPUObservation(state model.DiagnosisState, dataType model.ObservationDataType, gpuID string) *model.Observation {
+	for i := len(state.Observations) - 1; i >= 0; i-- {
+		observation := &state.Observations[i]
+		if observation.Status != model.ObservationSucceeded || observation.Data == nil || observation.Data.Type != dataType {
+			continue
+		}
+		if dataType == model.ObservationDataXIDEvents && observation.Data.XIDEvents.GPUID == gpuID {
+			return observation
+		}
+		if dataType == model.ObservationDataKernelLogs && observation.Data.KernelLogs.GPUID == gpuID {
+			return observation
+		}
+	}
+	return nil
+}
+
+func refsForSubjectKeys(observation model.Observation, subjectID string, keys ...string) []model.EvidenceRef {
+	wanted := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		wanted[key] = struct{}{}
+	}
+	refs := make([]model.EvidenceRef, 0)
+	for _, fact := range observation.Facts {
+		if fact.SubjectID != subjectID {
+			continue
+		}
+		if _, ok := wanted[fact.Key]; ok {
+			refs = append(refs, model.EvidenceRef{ObservationID: observation.ID, FactID: fact.ID})
+		}
+	}
+	return refs
+}
+
+func refsForAllFacts(observation model.Observation) []model.EvidenceRef {
+	refs := make([]model.EvidenceRef, 0, len(observation.Facts))
+	for _, fact := range observation.Facts {
+		refs = append(refs, model.EvidenceRef{ObservationID: observation.ID, FactID: fact.ID})
+	}
+	return refs
+}
+
+func hasMatchingXIDLog(xidObservation, kernelObservation model.Observation) bool {
+	if xidObservation.Data == nil || xidObservation.Data.XIDEvents == nil || kernelObservation.Data == nil || kernelObservation.Data.KernelLogs == nil {
+		return false
+	}
+	for _, event := range xidObservation.Data.XIDEvents.Events {
+		for _, entry := range kernelObservation.Data.KernelLogs.Entries {
+			if entry.GPUID == event.GPUID && entry.RelatedXIDCode != nil && *entry.RelatedXIDCode == event.Code {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func refsForGPUKeys(observation model.Observation, gpuID string, keys ...string) []model.EvidenceRef {

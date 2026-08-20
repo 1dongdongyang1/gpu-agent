@@ -158,6 +158,18 @@ func TestPolicyAppliesScopeToXIDAndKernelQueries(t *testing.T) {
 	}
 }
 
+func TestPolicyRejectsNewToolAfterExecutionBudgetIsConsumed(t *testing.T) {
+	state := testState(t)
+	for i := 0; i < state.Limits.MaxExecutionAttempts; i++ {
+		state.ToolCalls = append(state.ToolCalls, model.ToolCall{ID: "previous", DecisionID: "decision", ToolName: QueryGPUStatus, TargetID: "host-01", Status: model.ToolCallSucceeded})
+	}
+	call := model.ToolCall{ID: "next", DecisionID: "next-decision", ToolName: QueryDriverStatus, TargetID: "host-01", RequestedArguments: model.ToolArguments{QueryDriverStatus: &model.QueryDriverStatusArgs{}}, Status: model.ToolCallPending}
+	_, _, policyErr := NewPolicy(NewRegistry()).Check(state, call)
+	if policyErr == nil || policyErr.Code != model.ErrorExecutionBudgetExhausted {
+		t.Fatalf("policy error = %+v, want execution_budget_exhausted", policyErr)
+	}
+}
+
 func TestRegistryRejectsOutOfRangeEventQueries(t *testing.T) {
 	registry := NewRegistry()
 	invalid := []struct {
