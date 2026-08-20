@@ -13,6 +13,9 @@ var forbiddenClaims = []string{
 	"gpu reset completed",
 	"driver reloaded",
 	"host rebooted",
+	"permanently failed",
+	"hardware replacement required",
+	"node isolated",
 }
 
 func Validate(state model.DiagnosisState, report model.DiagnosisReport) error {

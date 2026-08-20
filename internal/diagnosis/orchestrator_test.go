@@ -189,3 +189,45 @@ func TestOrchestratorAllowsFinishAfterFourthExecution(t *testing.T) {
 		}
 	}
 }
+
+func TestUnavailableDriverEscalatesWithoutPerGPUEventQueries(t *testing.T) {
+	scenario := mock.XIDScenario()
+	scenario.Machine.Driver = model.DriverStatusData{Loaded: false}
+	state, err := model.NewDiagnosisState("diagnosis-xid-driver", scenario.Alert, scenario.Scope, model.DiagnosisMode{Type: model.DiagnosisModeGeneralAgent}, model.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := idgen.NewSequential()
+	clock := fixedClock{now: scenario.Now}
+	orchestrator := NewOrchestrator(planner.NewDeterministic(ids), tools.NewPolicy(tools.NewRegistry()), tools.NewExecutor(scenario.Machine, ids, tools.WithClock(clock)), testReporter{}, ids, clock)
+	finalState, _, err := orchestrator.Run(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalState.Termination.Reason != model.StopEscalated || finalState.ExecutionAttempts() != 2 {
+		t.Fatalf("unexpected driver branch: termination=%s attempts=%d", finalState.Termination.Reason, finalState.ExecutionAttempts())
+	}
+	if len(finalState.ToolCalls) != 2 || finalState.ToolCalls[1].ToolName != tools.QueryDriverStatus {
+		t.Fatalf("driver branch queried unsafe or irrelevant tools: %+v", finalState.ToolCalls)
+	}
+}
+
+func TestMissingXIDEvidenceEscalatesAfterBoundedQueries(t *testing.T) {
+	scenario := mock.XIDScenario()
+	scenario.Machine.XIDEvents = nil
+	scenario.Machine.KernelLogs = nil
+	state, err := model.NewDiagnosisState("diagnosis-xid-empty", scenario.Alert, scenario.Scope, model.DiagnosisMode{Type: model.DiagnosisModeGeneralAgent}, model.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := idgen.NewSequential()
+	clock := fixedClock{now: scenario.Now}
+	orchestrator := NewOrchestrator(planner.NewDeterministic(ids), tools.NewPolicy(tools.NewRegistry()), tools.NewExecutor(scenario.Machine, ids, tools.WithClock(clock)), testReporter{}, ids, clock)
+	finalState, _, err := orchestrator.Run(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalState.Termination.Reason != model.StopEscalated || finalState.PlannerRounds() != 5 || finalState.ExecutionAttempts() != 4 {
+		t.Fatalf("unexpected missing-evidence branch: termination=%s rounds=%d attempts=%d", finalState.Termination.Reason, finalState.PlannerRounds(), finalState.ExecutionAttempts())
+	}
+}

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/1dongdongyang1/gpu-agent/internal/diagnosis"
 	"github.com/1dongdongyang1/gpu-agent/internal/idgen"
@@ -13,13 +14,25 @@ import (
 	"github.com/1dongdongyang1/gpu-agent/internal/tools"
 )
 
-const HighMemoryScenario = "high-memory"
+const (
+	HighMemoryScenario = "high-memory"
+	XIDDropScenario    = "xid-drop"
+)
+
+type scenarioClock struct{ now time.Time }
+
+func (c scenarioClock) Now() time.Time { return c.now }
 
 func Run(ctx context.Context, scenarioName string) (model.DiagnosisState, model.DiagnosisReport, error) {
-	if scenarioName != HighMemoryScenario {
+	var scenario mock.Scenario
+	switch scenarioName {
+	case HighMemoryScenario:
+		scenario = mock.HighMemoryScenario()
+	case XIDDropScenario:
+		scenario = mock.XIDScenario()
+	default:
 		return model.DiagnosisState{}, model.DiagnosisReport{}, fmt.Errorf("unsupported scenario %q", scenarioName)
 	}
-	scenario := mock.HighMemoryScenario()
 	if err := scenario.Validate(); err != nil {
 		return model.DiagnosisState{}, model.DiagnosisReport{}, fmt.Errorf("invalid scenario: %w", err)
 	}
@@ -35,13 +48,14 @@ func Run(ctx context.Context, scenarioName string) (model.DiagnosisState, model.
 	}
 	ids := idgen.NewSequential()
 	registry := tools.NewRegistry()
+	clock := scenarioClock{now: scenario.Now}
 	orchestrator := diagnosis.NewOrchestrator(
 		planner.NewDeterministic(ids),
 		tools.NewPolicy(registry),
-		tools.NewExecutor(scenario.Machine, ids),
+		tools.NewExecutor(scenario.Machine, ids, tools.WithClock(clock)),
 		report.NewBuilder(),
 		ids,
-		diagnosis.RealClock{},
+		clock,
 	)
 	return orchestrator.Run(ctx, state)
 }

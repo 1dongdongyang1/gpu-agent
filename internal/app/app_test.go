@@ -61,6 +61,54 @@ func TestUnsupportedScenarioFailsClosed(t *testing.T) {
 	}
 }
 
+func TestXIDDropScenarioEndToEndAcceptance(t *testing.T) {
+	state, diagnosisReport, err := Run(context.Background(), XIDDropScenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != model.DiagnosisFinished || state.Termination == nil || state.Termination.Reason != model.StopEvidenceSufficient {
+		t.Fatalf("unexpected lifecycle: status=%s termination=%+v", state.Status, state.Termination)
+	}
+	if diagnosisReport.Outcome != model.OutcomeIssueIdentified || state.PlannerRounds() != 5 || state.ExecutionAttempts() != 4 || state.RejectedCalls() != 0 {
+		t.Fatalf("unexpected Xid result: outcome=%s rounds=%d attempts=%d rejected=%d", diagnosisReport.Outcome, state.PlannerRounds(), state.ExecutionAttempts(), state.RejectedCalls())
+	}
+	want := []string{tools.QueryGPUStatus, tools.QueryDriverStatus, tools.QueryXIDEvents, tools.QueryRecentKernelLogs}
+	for i, name := range want {
+		if state.ToolCalls[i].ToolName != name {
+			t.Fatalf("tool %d = %s, want %s", i, state.ToolCalls[i].ToolName, name)
+		}
+	}
+	if err := report.Validate(state, diagnosisReport); err != nil {
+		t.Fatalf("Xid report evidence is invalid: %v", err)
+	}
+	assertEveryEvidenceBelongsToObservation(t, state, diagnosisReport)
+	combined := strings.ToLower(reportText(diagnosisReport))
+	for _, required := range []string{"gpu-0 was unavailable", "xid 79", "permanent hardware damage"} {
+		if !strings.Contains(combined, required) {
+			t.Fatalf("Xid report omitted %q: %s", required, combined)
+		}
+	}
+	for _, forbidden := range []string{"permanently failed", "hardware replacement required", "gpu reset completed", "node isolated"} {
+		if strings.Contains(combined, forbidden) {
+			t.Fatalf("Xid report crossed boundary with %q", forbidden)
+		}
+	}
+}
+
+func TestXIDDropScenarioIsDeterministic(t *testing.T) {
+	firstState, firstReport, err := Run(context.Background(), XIDDropScenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondState, secondReport, err := Run(context.Background(), XIDDropScenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(firstState, secondState) || !reflect.DeepEqual(firstReport, secondReport) {
+		t.Fatal("same Xid scenario produced different state or report")
+	}
+}
+
 func assertEveryEvidenceBelongsToObservation(t *testing.T, state model.DiagnosisState, diagnosisReport model.DiagnosisReport) {
 	t.Helper()
 	refs := make([]model.EvidenceRef, 0)
@@ -109,4 +157,21 @@ func assertReportBoundaries(t *testing.T, diagnosisReport model.DiagnosisReport)
 			t.Fatalf("report crossed evidence boundary with %q", forbidden)
 		}
 	}
+}
+
+func reportText(diagnosisReport model.DiagnosisReport) string {
+	var parts []string
+	for _, finding := range diagnosisReport.ConfirmedFindings {
+		parts = append(parts, finding.Text)
+	}
+	for _, inference := range diagnosisReport.Inferences {
+		parts = append(parts, inference.Text)
+	}
+	for _, unknown := range diagnosisReport.Unknowns {
+		parts = append(parts, unknown.Text, unknown.Reason)
+	}
+	for _, recommendation := range diagnosisReport.Recommendations {
+		parts = append(parts, recommendation.Text, recommendation.Reason)
+	}
+	return strings.Join(parts, " ")
 }

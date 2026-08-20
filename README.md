@@ -2,7 +2,7 @@
 
 这是一个面向秋招演示的 Go + Mock GPU 只读故障诊断 Agent。当前第一条闭环使用确定性 Planner 验证受控 Agent 循环、统一 Mock、只读工具、证据链、终止机制和诊断报告。
 
-当前可运行路径：
+当前可运行高显存路径：
 
 ```text
 模糊 GPU 异常告警
@@ -22,6 +22,14 @@
 ```bash
 go run ./cmd/gpu-agent --scenario high-memory
 ```
+
+Xid / 掉卡路径：
+
+```bash
+go run ./cmd/gpu-agent --scenario xid-drop
+```
+
+该场景按 `query_gpu_status → query_driver_status → query_xid_events → query_recent_kernel_logs → finish` 调查 GPU-0 unavailable 与 Xid 79。报告保留永久硬件损坏、具体底层原因和恢复安全性等未知项。
 
 CLI 输出 JSON，其中包含工具调用路径、循环计数、终止原因和带 `ObservationID + FactID` 引用的报告。
 
