@@ -8,6 +8,7 @@ import (
 
 type Scenario struct {
 	Name    string
+	Now     time.Time
 	Alert   model.Alert
 	Scope   model.Scope
 	Machine MachineState
@@ -16,6 +17,7 @@ type Scenario struct {
 func HighMemoryScenario() Scenario {
 	return Scenario{
 		Name: "high-memory",
+		Now:  time.Date(2026, 8, 20, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60)),
 		Alert: model.Alert{
 			ID:       "alert-001",
 			TargetID: "host-01",
@@ -43,6 +45,7 @@ func XIDScenario() Scenario {
 	xidCode := int64(79)
 	return Scenario{
 		Name: "xid-drop",
+		Now:  time.Date(2026, 8, 20, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60)),
 		Alert: model.Alert{
 			ID:       "alert-xid-001",
 			TargetID: "host-01",
@@ -74,6 +77,9 @@ func XIDScenario() Scenario {
 }
 
 func (s Scenario) Validate() error {
+	if s.Now.IsZero() {
+		return invalidScenario("scenario clock must not be zero")
+	}
 	if err := s.Alert.Validate(); err != nil {
 		return err
 	}

@@ -26,7 +26,8 @@ func (p Policy) Check(state model.DiagnosisState, call model.ToolCall) (model.To
 	if err != nil {
 		return model.ToolArguments{}, "", policyError(model.ErrorInvalidArguments, err.Error())
 	}
-	if call.ToolName == QueryGPUProcesses && !state.Scope.AllowsGPU(normalized.QueryGPUProcesses.GPUID) {
+	gpuID := scopedGPUID(call.ToolName, normalized)
+	if gpuID != "" && !state.Scope.AllowsGPU(gpuID) {
 		return model.ToolArguments{}, "", policyError(model.ErrorGPUOutOfScope, "requested GPU is outside diagnosis scope")
 	}
 	fingerprint := Fingerprint(call.ToolName, call.TargetID, normalized)
@@ -46,6 +47,19 @@ func (p Policy) Check(state model.DiagnosisState, call model.ToolCall) (model.To
 		return model.ToolArguments{}, "", policyError(model.ErrorDuplicateCall, "an identical call already failed twice")
 	}
 	return normalized, fingerprint, nil
+}
+
+func scopedGPUID(toolName string, arguments model.ToolArguments) string {
+	switch toolName {
+	case QueryGPUProcesses:
+		return arguments.QueryGPUProcesses.GPUID
+	case QueryXIDEvents:
+		return arguments.QueryXIDEvents.GPUID
+	case QueryRecentKernelLogs:
+		return arguments.QueryRecentKernelLogs.GPUID
+	default:
+		return ""
+	}
 }
 
 func policyError(code model.ErrorCode, message string) *model.RuntimeError {

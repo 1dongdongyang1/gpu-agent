@@ -129,6 +129,18 @@ func (failingMachine) QueryGPUProcesses(string, string) ([]model.GPUProcess, err
 	return nil, context.DeadlineExceeded
 }
 
+func (failingMachine) QueryDriverStatus(string) (model.DriverStatusData, error) {
+	return model.DriverStatusData{}, context.DeadlineExceeded
+}
+
+func (failingMachine) QueryXIDEvents(string, string, time.Time, int) ([]model.XIDEvent, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func (failingMachine) QueryRecentKernelLogs(string, string, time.Time, int) ([]model.KernelLogEntry, error) {
+	return nil, context.DeadlineExceeded
+}
+
 func TestLoopGuardStopsConsecutiveToolFailures(t *testing.T) {
 	scenario := mock.HighMemoryScenario()
 	state, err := model.NewDiagnosisState("diagnosis-001", scenario.Alert, scenario.Scope, model.DiagnosisMode{Type: model.DiagnosisModeGeneralAgent}, model.DefaultLimits())
