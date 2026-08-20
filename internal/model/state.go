@@ -129,8 +129,8 @@ const (
 )
 
 type Termination struct {
-	Reason StopReason
-	Detail string
+	Reason StopReason `json:"reason"`
+	Detail string     `json:"detail"`
 }
 
 func (t Termination) Validate() error {

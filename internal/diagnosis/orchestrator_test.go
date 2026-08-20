@@ -85,3 +85,66 @@ func TestOrchestratorSafelyStopsInvalidPlannerOutput(t *testing.T) {
 		t.Fatalf("invalid planner output was not safely contained: %+v", finalState)
 	}
 }
+
+type outOfScopePlanner struct{ ids idgen.Generator }
+
+func (p outOfScopePlanner) Decide(model.DiagnosisState) (model.PlannerDecision, error) {
+	return model.PlannerDecision{
+		ID:        p.ids.Next("decision"),
+		Type:      model.DecisionCallTool,
+		ToolName:  tools.QueryGPUProcesses,
+		Arguments: model.ToolArguments{QueryGPUProcesses: &model.QueryGPUProcessesArgs{GPUID: "GPU-9"}},
+		Reason:    "request an out-of-scope GPU for guard testing",
+	}, nil
+}
+
+func TestLoopGuardStopsRepeatedPolicyRejections(t *testing.T) {
+	scenario := mock.HighMemoryScenario()
+	scenario.Scope = model.Scope{TargetID: "host-01", GPUAccessMode: model.GPUAccessSelected, AllowedGPUs: []string{"GPU-0"}}
+	state, err := model.NewDiagnosisState("diagnosis-001", scenario.Alert, scenario.Scope, model.DiagnosisMode{Type: model.DiagnosisModeGeneralAgent}, model.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := idgen.NewSequential()
+	orchestrator := NewOrchestrator(outOfScopePlanner{ids: ids}, tools.NewPolicy(tools.NewRegistry()), tools.NewExecutor(scenario.Machine, ids), testReporter{}, ids, fixedClock{now: time.Unix(0, 0)})
+	finalState, _, err := orchestrator.Run(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalState.Termination.Reason != model.StopRepeatedPolicyRejection || finalState.RejectedCalls() != 2 || finalState.ExecutionAttempts() != 0 {
+		t.Fatalf("unexpected rejection guard result: termination=%s rejected=%d attempts=%d", finalState.Termination.Reason, finalState.RejectedCalls(), finalState.ExecutionAttempts())
+	}
+	if len(finalState.Observations) != 0 {
+		t.Fatalf("policy-rejected calls produced observations: %+v", finalState.Observations)
+	}
+}
+
+type failingMachine struct{}
+
+func (failingMachine) QueryGPUStatus(string) ([]model.GPUStatus, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func (failingMachine) QueryGPUProcesses(string, string) ([]model.GPUProcess, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func TestLoopGuardStopsConsecutiveToolFailures(t *testing.T) {
+	scenario := mock.HighMemoryScenario()
+	state, err := model.NewDiagnosisState("diagnosis-001", scenario.Alert, scenario.Scope, model.DiagnosisMode{Type: model.DiagnosisModeGeneralAgent}, model.DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := idgen.NewSequential()
+	orchestrator := NewOrchestrator(planner.NewDeterministic(ids), tools.NewPolicy(tools.NewRegistry()), tools.NewExecutor(failingMachine{}, ids), testReporter{}, ids, fixedClock{now: time.Unix(0, 0)})
+	finalState, _, err := orchestrator.Run(context.Background(), state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalState.Termination.Reason != model.StopConsecutiveFailures || finalState.ExecutionAttempts() != 2 {
+		t.Fatalf("unexpected failure guard result: termination=%s attempts=%d", finalState.Termination.Reason, finalState.ExecutionAttempts())
+	}
+	if len(finalState.Observations) != 2 || finalState.Observations[0].Status != model.ObservationFailed {
+		t.Fatalf("tool failures were not recorded as failed observations: %+v", finalState.Observations)
+	}
+}

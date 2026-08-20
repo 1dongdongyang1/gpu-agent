@@ -10,8 +10,8 @@ const (
 )
 
 type ConfirmedFinding struct {
-	Text         string
-	EvidenceRefs []EvidenceRef
+	Text         string        `json:"text"`
+	EvidenceRefs []EvidenceRef `json:"evidence_refs"`
 }
 
 type Confidence string
@@ -23,30 +23,30 @@ const (
 )
 
 type Inference struct {
-	Text         string
-	Confidence   Confidence
-	EvidenceRefs []EvidenceRef
+	Text         string        `json:"text"`
+	Confidence   Confidence    `json:"confidence"`
+	EvidenceRefs []EvidenceRef `json:"evidence_refs"`
 }
 
 type Unknown struct {
-	Text                  string
-	Reason                string
-	RelatedToolCallIDs    []string
-	RelatedObservationIDs []string
+	Text                  string   `json:"text"`
+	Reason                string   `json:"reason"`
+	RelatedToolCallIDs    []string `json:"related_tool_call_ids,omitempty"`
+	RelatedObservationIDs []string `json:"related_observation_ids,omitempty"`
 }
 
 type Recommendation struct {
-	Text         string
-	Reason       string
-	EvidenceRefs []EvidenceRef
+	Text         string        `json:"text"`
+	Reason       string        `json:"reason"`
+	EvidenceRefs []EvidenceRef `json:"evidence_refs"`
 }
 
 type DiagnosisReport struct {
-	DiagnosisID       string
-	Outcome           DiagnosisOutcome
-	ConfirmedFindings []ConfirmedFinding
-	Inferences        []Inference
-	Unknowns          []Unknown
-	Recommendations   []Recommendation
-	Termination       Termination
+	DiagnosisID       string             `json:"diagnosis_id"`
+	Outcome           DiagnosisOutcome   `json:"outcome"`
+	ConfirmedFindings []ConfirmedFinding `json:"confirmed_findings"`
+	Inferences        []Inference        `json:"inferences"`
+	Unknowns          []Unknown          `json:"unknowns"`
+	Recommendations   []Recommendation   `json:"recommendations"`
+	Termination       Termination        `json:"termination"`
 }

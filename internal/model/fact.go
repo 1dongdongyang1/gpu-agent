@@ -72,8 +72,8 @@ func (f ObservedFact) Validate() error {
 }
 
 type EvidenceRef struct {
-	ObservationID string
-	FactID        string
+	ObservationID string `json:"observation_id"`
+	FactID        string `json:"fact_id"`
 }
 
 func (r EvidenceRef) Validate() error {
