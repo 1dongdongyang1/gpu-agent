@@ -2,6 +2,18 @@ package model
 
 type ErrorCode string
 
+const (
+	ErrorToolNotRegistered        ErrorCode = "tool_not_registered"
+	ErrorToolNotReadOnly          ErrorCode = "tool_not_read_only"
+	ErrorInvalidArguments         ErrorCode = "invalid_arguments"
+	ErrorTargetOutOfScope         ErrorCode = "target_out_of_scope"
+	ErrorGPUOutOfScope            ErrorCode = "gpu_out_of_scope"
+	ErrorExecutionBudgetExhausted ErrorCode = "execution_budget_exhausted"
+	ErrorDuplicateCall            ErrorCode = "duplicate_call"
+	ErrorToolExecutionFailed      ErrorCode = "tool_execution_failed"
+	ErrorParseFailed              ErrorCode = "parse_failed"
+)
+
 type RuntimeError struct {
 	Code    ErrorCode
 	Message string
